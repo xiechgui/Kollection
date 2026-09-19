@@ -1,0 +1,1 @@
+{"version":"0.2.0","configurations":[{"name":"拾藏 C# 后端","type":"coreclr","request":"launch","preLaunchTask":"build","program":"${workspaceFolder}/src/Collection.Web/bin/Debug/net10.0/Collection.Web.dll","cwd":"${workspaceFolder}/src/Collection.Web","args":["--open"],"console":"integratedTerminal","env":{"ASPNETCORE_ENVIRONMENT":"Development"}}]}
