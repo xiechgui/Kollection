@@ -1,0 +1,11 @@
+.git
+**/bin
+**/obj
+**/node_modules
+**/__pycache__
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/.env*
+artifacts
+.test-data

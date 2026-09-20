@@ -1,5 +1,5 @@
 """Opt-in LAN authentication and real multipart upload checks; temporary data only."""
-import json, os, re, socket, subprocess, tempfile, threading, time, sys
+import json, os, re, socket, subprocess, tempfile, threading, time, sys, secrets
 import urllib.request, urllib.error
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,13 +10,16 @@ addresses = [a[4][0] for a in socket.getaddrinfo(socket.gethostname(), None, soc
 def private(ip):
     b = list(map(int, ip.split('.')))
     return b[0] == 10 or b[:2] == [192,168] or b[0] == 172 and 16 <= b[1] <= 31
+CLOUD = "--cloud" in sys.argv
+CLOUD_KEY = secrets.token_hex(32)
 UPLOAD_ONLY = "--upload-only" in sys.argv
-LAN = "127.0.0.1" if UPLOAD_ONLY else next((a for a in addresses if private(a)), None)
+LAN = "collection.test" if CLOUD else "127.0.0.1" if UPLOAD_ONLY else next((a for a in addresses if private(a)), None)
 if LAN is None:
     raise RuntimeError('Mobile integration tests require an assigned private IPv4 address')
 
 def call(path, method='GET', data=None, cookie=None, expected=200, local=False, headers=None):
-    h={'Host': f'127.0.0.1:{PORT}' if local else f'{LAN}:{PORT}', 'X-Collection-Client':'local-ui'}
+    h={'Host': f'127.0.0.1:{PORT}' if local else LAN if CLOUD else f'{LAN}:{PORT}', 'X-Collection-Client':'local-ui'}
+    if CLOUD: h['Origin']='https://collection.test'
     if cookie: h['Cookie'] = cookie
     if isinstance(data, dict): h['Content-Type']='application/json'; data=json.dumps(data).encode()
     h.update(headers or {})
@@ -36,8 +39,8 @@ def multipart(revision, name, content):
 
 with tempfile.TemporaryDirectory() as folder:
     lines=[]
-    proc=subprocess.Popen([os.getenv('DOTNET_EXE','dotnet'),str(ROOT/'src/Collection.Web/bin/Release/net10.0/Collection.Web.dll')]+([] if UPLOAD_ONLY else ['--lan']),
-        cwd=ROOT/'src/Collection.Web',env=dict(os.environ,COLLECTION_DATA=folder,COLLECTION_PORT=str(PORT),COLLECTION_LAN_IP=LAN),
+    proc=subprocess.Popen([os.getenv('DOTNET_EXE','dotnet'),str(ROOT/'src/Collection.Web/bin/Release/net10.0/Collection.Web.dll')]+([] if UPLOAD_ONLY or CLOUD else ['--lan']),
+        cwd=ROOT/'src/Collection.Web',env=dict(os.environ,COLLECTION_DATA=folder,COLLECTION_PORT=str(PORT),COLLECTION_LAN_IP=LAN,COLLECTION_CLOUD="1" if CLOUD else "0",COLLECTION_PUBLIC_URL="https://collection.test",COLLECTION_ACCESS_KEY=CLOUD_KEY),
         stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding='utf-8')
     # Read lines incrementally rather than waiting for EOF.
     def read_lines():
@@ -46,14 +49,14 @@ with tempfile.TemporaryDirectory() as folder:
     try:
         for _ in range(150):
             try:
-                call('/api/state',local=True)
-                if UPLOAD_ONLY or re.search(r'访问口令: ([0-9a-f]{24})',''.join(lines)): break
+                call('/health' if CLOUD else '/api/state',local=True)
+                if UPLOAD_ONLY or CLOUD or re.search(r'访问口令: ([0-9a-f]{24})',''.join(lines)): break
             except OSError: pass
             if proc.poll() is not None: raise RuntimeError(''.join(lines))
             time.sleep(.1)
         cookie=None
         if not UPLOAD_ONLY:
-            key=re.search(r'访问口令: ([0-9a-f]{24})',''.join(lines)).group(1)
+            key=CLOUD_KEY if CLOUD else re.search(r'访问口令: ([0-9a-f]{24})',''.join(lines)).group(1)
             assert '连接你的收藏库' in call('/')[0].decode()
             call('/api/state',expected=401);call('/api/export',expected=401)
             call('/api/login','POST',{'key':'wrong'},expected=401)
@@ -62,6 +65,10 @@ with tempfile.TemporaryDirectory() as folder:
             cookie=hs['Set-Cookie'].split(';')[0]
             assert 'httponly' in hs['Set-Cookie'].lower() and 'samesite=strict' in hs['Set-Cookie'].lower()
             assert json.loads(call('/api/client',cookie=cookie)[0])['remote']
+        if CLOUD:
+            assert 'secure' in hs['Set-Cookie'].lower()
+            call('/api/state', local=True, expected=403)
+            call('/api/login','POST',{'key':key},expected=403,headers={'Origin':'http://collection.test'})
         s=state(cookie)
         if not UPLOAD_ONLY:
             call('/api/import','POST',{'revision':s['revision'],'path':folder,'recursive':False},cookie,expected=403)
@@ -80,10 +87,15 @@ with tempfile.TemporaryDirectory() as folder:
             call('/api/items/'+draft['id']+'/media',expected=401)
         if not UPLOAD_ONLY:
             call('/api/items/'+draft['id']+'/locate','POST',{},cookie,expected=403)
+        if CLOUD:
+            outside=Path(folder)/'outside.png'; outside.write_bytes(b'not an uploaded file')
+            modified=s['items'][0]; modified['values']['path']['text']=str(outside)
+            call('/api/items/'+draft['id'],'PUT',{'revision':s['revision'],'item':modified},cookie)
+            call('/api/items/'+draft['id']+'/media',cookie=cookie,expected=404)
         if not UPLOAD_ONLY:
             call('/api/logout','POST',{},cookie)
         if not UPLOAD_ONLY:
             call('/api/state',cookie=cookie,expected=401)
-        print('PASS: upload staging, failure cleanup and confirmation' if UPLOAD_ONLY else 'PASS: LAN login, cookie flags, origin guard, staging upload, failure cleanup, confirmation, media protection, logout revocation')
+        print('PASS: upload staging, failure cleanup and confirmation' if UPLOAD_ONLY else 'PASS: cloud login, secure cookies, no local bypass, upload boundary and logout' if CLOUD else 'PASS: LAN login, cookie flags, origin guard, staging upload, failure cleanup, confirmation, media protection, logout revocation')
     finally:
         proc.terminate();proc.wait(timeout=10);reader.join(timeout=2)

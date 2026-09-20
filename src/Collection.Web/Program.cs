@@ -6,20 +6,23 @@ using System.Text.Json;
 var publishedRoot=Path.Combine(AppContext.BaseDirectory,"wwwroot");
 var webRoot=File.Exists(Path.Combine(publishedRoot,"index.html"))?publishedRoot:Path.Combine(Directory.GetCurrentDirectory(),"wwwroot");
 var builder=WebApplication.CreateBuilder(new WebApplicationOptions{Args=args,WebRootPath=webRoot});
-var port=int.TryParse(Environment.GetEnvironmentVariable("COLLECTION_PORT"),out var p)?p:5278;
+var port=int.TryParse(Environment.GetEnvironmentVariable("COLLECTION_PORT") ?? Environment.GetEnvironmentVariable("PORT"),out var p)?p:5278;
 if(port<1024||port>65535)throw new ArgumentException("COLLECTION_PORT must be between 1024 and 65535.");
 var mobile = new MobileAccess(args.Contains("--lan"));
-builder.WebHost.UseUrls(mobile.Address == null ? [$"http://127.0.0.1:{port}"] : [$"http://127.0.0.1:{port}", $"http://{mobile.Address}:{port}"]);
+builder.WebHost.UseUrls(mobile.Cloud ? [$"http://0.0.0.0:{port}"] : mobile.Address == null ? [$"http://127.0.0.1:{port}"] : [$"http://127.0.0.1:{port}", $"http://{mobile.Address}:{port}"]);
 builder.WebHost.ConfigureKestrel(o => o.Limits.MaxRequestBodySize = 101L * 1024 * 1024);
 builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o => o.MultipartBodyLengthLimit = 101L * 1024 * 1024);
 var folder=Environment.GetEnvironmentVariable("COLLECTION_DATA")??Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Shicang");
+if(mobile.Cloud && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("COLLECTION_DATA"))) throw new ArgumentException("Cloud mode requires COLLECTION_DATA on a persistent volume.");
 var store=new LibraryStore(folder);
 var app=builder.Build();
 app.Use(async(ctx,next)=>{
+    // Platform health probes do not expose collection data or require login.
+    if(mobile.Cloud && ctx.Request.Path == "/health" && ctx.Request.Method == "GET") { await ctx.Response.WriteAsJsonAsync(new { status = "ok" }); return; }
     // Reject DNS-rebinding hosts and cross-origin calls into the local file API.
     if(!mobile.AllowedHost(ctx.Request.Host.Host)){ctx.Response.StatusCode=403;return;}
     var origin=ctx.Request.Headers.Origin.ToString();
-    if(origin.Length>0&&origin!=$"http://{ctx.Request.Host}"){ctx.Response.StatusCode=403;return;}
+    if(origin.Length>0&&origin!=mobile.ExpectedOrigin(ctx)){ctx.Response.StatusCode=403;return;}
     if(ctx.Request.Path.StartsWithSegments("/api") && ctx.Request.Headers["Sec-Fetch-Site"]=="cross-site"){ctx.Response.StatusCode=403;return;}
     if(ctx.Request.Method is not ("GET" or "HEAD") && ctx.Request.Headers["X-Collection-Client"]!="local-ui"){ctx.Response.StatusCode=403;return;}
     ctx.Response.Headers["X-Content-Type-Options"]="nosniff";
@@ -29,7 +32,7 @@ app.Use(async(ctx,next)=>{
 });
 app.Use(mobile.Handle);
 app.UseDefaultFiles();app.UseStaticFiles();
-app.MapGet("/api/client", (HttpContext ctx) => new { remote = !MobileAccess.IsLocal(ctx), uploadLimitMb = 100 });
+app.MapGet("/api/client", (HttpContext ctx) => new { remote = !mobile.CanAccessLocalFiles(ctx), uploadLimitMb = 100 });
 app.MapPost("/api/logout", (HttpContext ctx) => { mobile.Logout(ctx); return Results.Ok(); });
 app.MapGet("/api/state",()=>store.Read());
 app.MapGet("/api/export",()=>Results.File(JsonSerializer.SerializeToUtf8Bytes(store.Read(),LibraryStore.Json),"application/json","collection-export.json"));
@@ -53,7 +56,7 @@ app.MapPost("/api/tags",(TagRequest r)=>store.Change(r.Revision,s=>{
     if(old!=null)s.Tags[s.Tags.IndexOf(old)]=r.Tag;else s.Tags.Add(r.Tag);
 }));
 app.MapPost("/api/import",(HttpContext ctx, ImportRequest r)=>{
-    if(!MobileAccess.IsLocal(ctx)) return Results.Json(new {error="手机端请使用上传文件；电脑路径扫描只能在电脑端操作。"}, statusCode:403);
+    if(!mobile.CanAccessLocalFiles(ctx)) return Results.Json(new {error="手机端请使用上传文件；电脑路径扫描只能在电脑端操作。"}, statusCode:403);
     object? summary=null;var state=store.Change(r.Revision,s=>summary=FileImporter.Import(s,r.Path,r.Recursive));return Results.Ok(new{state,summary});
 });
 app.MapPost("/api/upload", async (HttpContext ctx) => {
@@ -85,12 +88,16 @@ app.MapGet("/api/items/{id}/media",(string id)=>{
     if(i==null||!LibraryStore.EffectiveTags(s,i).Contains("file"))return Results.NotFound();
     var path=i.Values.GetValueOrDefault("path")?.Text;
     if(path==null||!File.Exists(path))return Results.NotFound();
+    if(mobile.Cloud) {
+        var uploads = Path.GetFullPath(Path.Combine(folder,"uploads")) + Path.DirectorySeparatorChar;
+        if(!Path.GetFullPath(path).StartsWith(uploads, OperatingSystem.IsWindows()?StringComparison.OrdinalIgnoreCase:StringComparison.Ordinal)) return Results.NotFound();
+    }
     var provider=new FileExtensionContentTypeProvider();
     if(!provider.TryGetContentType(path,out var type)||!(type.StartsWith("image/")&&type!="image/svg+xml"||type.StartsWith("video/")))return Results.BadRequest(new{error="此类型不支持浏览器预览。"});
     return Results.File(Path.GetFullPath(path),type,enableRangeProcessing:true);
 });
 app.MapPost("/api/items/{id}/locate",(HttpContext ctx, string id)=>{
-    if(!MobileAccess.IsLocal(ctx))return Results.Json(new{error="资源管理器定位只能在电脑端操作。"},statusCode:403);
+    if(!mobile.CanAccessLocalFiles(ctx))return Results.Json(new{error="资源管理器定位只能在电脑端操作。"},statusCode:403);
     var s=store.Read();var i=s.Items.FirstOrDefault(i=>i.Id==id&&!i.Draft);
     if(i==null||!LibraryStore.EffectiveTags(s,i).Contains("file"))return Results.BadRequest(new{error="不是正式文件对象。"});
     var path=i.Values.GetValueOrDefault("path")?.Text;
