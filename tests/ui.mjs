@@ -34,7 +34,8 @@ try {
   dom = new JSDOM(html, { url: base, runScripts: 'outside-only', virtualConsole: vc });
   const w = dom.window, doc = w.document;
   w.structuredClone = structuredClone;
-  w.crypto.randomUUID = randomUUID;
+  // LAN HTTP is not a secure context: exercise the getRandomValues fallback.
+  w.crypto.randomUUID = undefined;
   w.confirm = () => true;
   w.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   w.HTMLDialogElement.prototype.close = function () { this.open = false; };
@@ -56,6 +57,18 @@ try {
     catch (e) { failures.push(name + ': ' + e.message); console.error('FAIL:', name, e.message); }
   }
   await waitFor(() => doc.querySelector('[data-filter="movie"]'));
+  await test('Mobile navigation and unsaved detail protection', async () => {
+    get('#mobile-menu').click(); assert.ok(doc.body.classList.contains('menu-open'));
+    assert.equal(get('#mobile-menu').getAttribute('aria-expanded'), 'true');
+    get('#menu-close').click(); assert.ok(!doc.body.classList.contains('menu-open'));
+    get('#new').click(); input('#item-name', 'Unsaved phone item');
+    assert.ok(doc.body.classList.contains('detail-open'));
+    w.confirm=()=>false; get('#detail-back').click();
+    assert.equal(get('#item-name').value, 'Unsaved phone item');
+    w.confirm=()=>true; get('#detail-back').click();
+    assert.ok(!doc.body.classList.contains('detail-open'));
+    assert.equal((await state()).items.length, 0);
+  });
   await test('Create actor and movie; reference and reverse navigation', async () => {
     get('#new').click(); input('#item-name', 'UI actor'); check('[data-tag-check="actor"]'); await save();
     const actor = (await state()).items.find(i => i.name === 'UI actor');

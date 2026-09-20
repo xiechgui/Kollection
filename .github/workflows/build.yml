@@ -20,6 +20,8 @@ jobs:
         run: dotnet build src/Collection.Web/Collection.Web.csproj -c Release
       - name: Integration smoke tests
         run: python tests/smoke.py
+      - name: Mobile access and upload tests
+        run: python tests/mobile.py
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -35,6 +37,7 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item scripts/Start.cmd artifacts/Shicang-win-x64/Start.cmd
+          Copy-Item scripts/Start-Mobile.cmd artifacts/Shicang-win-x64/Start-Mobile.cmd
           Copy-Item README.md artifacts/Shicang-win-x64/README.md
           Compress-Archive -Path artifacts/Shicang-win-x64 -DestinationPath artifacts/Shicang-win-x64.zip
       - uses: actions/upload-artifact@v4
