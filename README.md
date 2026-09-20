@@ -110,3 +110,15 @@ python tests/smoke.py
 ```
 
 测试不读取或修改正式收藏库。GitHub Actions 会执行相同测试。运行验证记录见 `VALIDATION.md`。
+
+## 前端交互回归测试（开发可选）
+
+安装 Node.js 24 后，在仓库根目录运行：
+
+```powershell
+npm ci --prefix tests
+dotnet build src/Collection.Web/Collection.Web.csproj -c Release
+node tests/ui.mjs
+```
+
+测试使用 jsdom 和真实后端，自动创建、清理临时数据，覆盖引用跳转、清空属性、导入搜索状态及暂存确认。它不验证真实浏览器布局或媒体播放。日常运行程序仍不需要 Node.js。

@@ -5,3 +5,4 @@ artifacts/
 *.db-shm
 *.db-wal
 .test-data/
+**/node_modules/

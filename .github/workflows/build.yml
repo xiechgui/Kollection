@@ -20,6 +20,15 @@ jobs:
         run: dotnet build src/Collection.Web/Collection.Web.csproj -c Release
       - name: Integration smoke tests
         run: python tests/smoke.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: tests/package-lock.json
+      - name: Install UI test dependencies
+        run: npm ci --prefix tests
+      - name: DOM and HTTP UI regression tests
+        run: node tests/ui.mjs
       - name: Publish portable Windows x64
         run: dotnet publish src/Collection.Web/Collection.Web.csproj -c Release -r win-x64 --self-contained true -o artifacts/Shicang-win-x64
       - name: Include launcher and documentation
