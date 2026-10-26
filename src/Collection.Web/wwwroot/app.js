@@ -12,7 +12,7 @@ function newId(){
  return [...bytes].map(b=>b.toString(16).padStart(2,'0')).join('');
 }
 function menu(open){document.body.classList.toggle('menu-open',open);$('#mobile-menu').setAttribute('aria-expanded',String(open));$('#menu-backdrop').hidden=!open;}
-function closeDetail(){if(!leave())return;dirty=false;edit=null;selected=null;document.body.classList.remove('detail-open');$('#detail').innerHTML='<p class="muted">选择收藏以查看详情。</p>';render();}
+function closeDetail(){if(!leave())return;openSequence++;dirty=false;edit=null;selected=null;document.body.classList.remove('detail-open');$('#detail').innerHTML='<p class="muted">选择收藏以查看详情。</p>';render();}
 async function acceptImport(r){setCatalog(r.catalog);view='drafts';filter='';page=1;$('#search').value='';dirty=false;edit=null;selected=null;document.body.classList.remove('detail-open');menu(false);$('#detail').innerHTML='<p class="muted">选择候选对象开始审核。</p>';await render();notify(`已暂存 ${r.summary.added} 项`);}
 
 function uploadFile(){
@@ -86,7 +86,7 @@ async function pollJobs(){
 $('#mobile-menu').onclick=()=>menu(true);$('#menu-close').onclick=()=>menu(false);$('#menu-backdrop').onclick=()=>menu(false);$('#upload').onclick=uploadFile;
 $('#logout').onclick=async()=>{if(!leave())return;try{await api('/logout','POST',{});dirty=false;location.reload();}catch(e){notify(e.message);}};
 $('#cancel').onclick=()=>$('#modal').close();$('#search').oninput=()=>{page=1;clearTimeout(render.timer);render.timer=setTimeout(render,150);};$('#toggle').onclick=()=>{list=!list;$('#toggle').textContent=list?'卡片视图':'列表视图';render();};
-$('#new').onclick=()=>{if(!leave())return;selected=null;edit={id:newId(),name:'',tags:[],values:{},draft:false,updatedAt:new Date().toISOString()};saveRevision=state.revision;inboundRows=[];inboundTotal=0;dirty=true;renderDetail();$('#item-name').focus();};
+$('#new').onclick=()=>{if(!leave())return;openSequence++;selected=null;edit={id:newId(),name:'',tags:[],values:{},draft:false,updatedAt:new Date().toISOString()};saveRevision=state.revision;inboundRows=[];inboundTotal=0;dirty=true;renderDetail();$('#item-name').focus();};
 $('#import').onclick=()=>{if(!leave())return;const revision=state.revision;modal('<h2>导入本地文件</h2><p class="muted">填写运行后端的电脑上的文件或文件夹绝对路径。不会复制、移动或删除原文件。</p><label class="field"><span>文件 / 文件夹路径</span><input id="import-path" required placeholder="D:\\Movies"></label><label><input id="recursive" type="checkbox" checked> 包含子文件夹</label><p class="muted">后台扫描并分批暂存，可查看进度或取消。达到收藏库容量上限时停止。</p>',async()=>{await api('/imports','POST',{revision,path:$('#import-path').value,recursive:$('#recursive').checked});view='drafts';filter='';page=1;$('#search').value='';dirty=false;edit=null;selected=null;document.body.classList.remove('detail-open');await render();notify('导入任务已加入队列');await pollJobs();});};
 $('#detail').addEventListener('input',e=>{
  if(!e.target.dataset.refSearch){dirty=true;return;}
@@ -98,7 +98,7 @@ $('#detail').addEventListener('change',e=>{if(e.target.dataset.tagCheck){collect
 document.addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;try{
  if(b.id==='detail-back'){closeDetail();return;}
  if(b.dataset.item||b.dataset.jump){await openItem(b.dataset.item||b.dataset.jump);return;}
- if(b.dataset.view||b.dataset.filter){if(!leave())return;dirty=false;edit=null;selected=null;menu(false);document.body.classList.remove('detail-open');view=b.dataset.view||'items';filter=b.dataset.filter||'';page=1;$('#detail').innerHTML='<p class="muted">选择收藏以查看详情。</p>';render();}
+ if(b.dataset.view||b.dataset.filter){if(!leave())return;openSequence++;dirty=false;edit=null;selected=null;menu(false);document.body.classList.remove('detail-open');view=b.dataset.view||'items';filter=b.dataset.filter||'';page=1;$('#detail').innerHTML='<p class="muted">选择收藏以查看详情。</p>';render();}
  if(b.id==='more'){page++;await render();}
  if(b.id==='previous'){page=Math.max(1,page-1);await render();}
  if(b.id==='select-page'){for(const i of state.items)checked.set(i.id,i.version);await render();}

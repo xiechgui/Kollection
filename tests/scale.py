@@ -45,6 +45,8 @@ with tempfile.TemporaryDirectory() as tmp:
     proc=start(tmp)
     try:
         assert len(list(Path(tmp).glob('collection-v1-*.db')))==1
+        with closing(sqlite3.connect(next(Path(tmp).glob('collection-v1-*.db')))) as backup:
+            assert json.loads(backup.execute('SELECT json FROM library').fetchone()[0])==legacy
         page=call('/items?limit=60');second=call('/items?limit=60&offset=60')
         assert page['total']==125 and len(page['items'])==60
         assert not {i['id'] for i in page['items']} & {i['id'] for i in second['items']}
@@ -98,9 +100,20 @@ with tempfile.TemporaryDirectory() as tmp:
         call('/thumbnails/rebuild','POST',{})
         assert not list((Path(tmp)/'thumbnails').glob('*.jpg'))
         # Startup preserves records and completed jobs; migration runs exactly once.
-        stop(proc);proc=start(tmp)
+        stop(proc)
+        jobs_file=Path(tmp)/'import-jobs.json';saved_jobs=json.loads(jobs_file.read_text())
+        saved_jobs.append({'id':'interrupted-test','path':str(files),'recursive':True,'status':'running','errors':[]})
+        jobs_file.write_text(json.dumps(saved_jobs))
+        proc=start(tmp)
+        assert next(j for j in call('/imports') if j['id']=='interrupted-test')['status']=='interrupted'
         assert call('/catalog')['count']==201 and len(list(Path(tmp).glob('collection-v1-*.db')))==1
         assert next(j for j in call('/imports') if j['id']==job['id'])['status']=='completed'
+        cancel_files=Path(tmp)/'cancel-source';cancel_files.mkdir()
+        for n in range(1000):(cancel_files/f'{n}.txt').write_text('cancel fixture')
+        cancelled=call('/imports','POST',{'revision':0,'path':str(cancel_files),'recursive':False})
+        call('/imports/'+cancelled['id']+'/cancel','POST',{})
+        cancelled=wait_job(cancelled['id']);assert cancelled['status']=='cancelled',cancelled
+        assert call('/catalog')['draftCount']==cancelled['added']
         print('PASS: legacy backup/migration, SQL pagination/search, row versions, atomic batch, persistent jobs, deduplication and thumbnail cache')
     finally:stop(proc)
 
