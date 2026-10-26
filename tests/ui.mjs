@@ -75,10 +75,12 @@ try {
     get('#new').click(); input('#item-name', 'UI movie'); check('[data-tag-check="movie"]');
     change('[data-ref="actor"]', actor.id); input('[data-value="rating"]', '9'); await save();
     get(`[data-jump="${actor.id}"]`).click();
+    await waitFor(() => doc.querySelector('#item-name')?.value === 'UI actor');
     assert.equal(get('#item-name').value, 'UI actor');
     assert.ok(get('#detail').textContent.includes('UI movie'));
     const movie = (await state()).items.find(i => i.name === 'UI movie');
     get(`#detail [data-jump="${movie.id}"]`).click();
+    await waitFor(() => doc.querySelector('[data-value="rating"]'));
     assert.equal(get('[data-value="rating"]').value, '9');
   });
   await test('Clearing a suggested attribute removes its stored value', async () => {
@@ -93,6 +95,7 @@ try {
     get('#import').click(); input('#import-path', file);
     get('#modal-form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
     await waitFor(() => !get('#modal').open);
+    await waitFor(() => get('#content').textContent.includes('ui-import.txt'));
     assert.equal(get('#search').value, '');
     assert.ok(get('#content').textContent.includes('ui-import.txt'));
   });
@@ -106,7 +109,8 @@ try {
   await test('Review import edits and confirm into collection', async () => {
     get('[data-view="drafts"]').click();
     const draft = (await state()).items.find(i => i.draft);
-    get(`[data-item="${draft.id}"]`).click(); input('#item-name', 'Reviewed text');
+    await waitFor(() => doc.querySelector(`[data-item="${draft.id}"]`));
+    get(`[data-item="${draft.id}"]`).click(); await waitFor(() => doc.querySelector('#approve')); input('#item-name', 'Reviewed text');
     get('#approve').click();
     await waitFor(async () => !(await state()).items.find(i => i.id === draft.id).draft);
     await waitFor(() => get('#title').textContent === '全部收藏');

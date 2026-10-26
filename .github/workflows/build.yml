@@ -20,6 +20,8 @@ jobs:
         run: dotnet build src/Collection.Web/Collection.Web.csproj -c Release
       - name: Integration smoke tests
         run: python tests/smoke.py
+      - name: Migration, pagination, jobs and thumbnail tests
+        run: python tests/scale.py
       - name: Mobile access and upload tests
         run: python tests/mobile.py
       - name: Cloud access and upload tests

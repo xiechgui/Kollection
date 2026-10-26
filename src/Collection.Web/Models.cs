@@ -15,6 +15,7 @@ public sealed class Tag
 }
 public sealed class Item
 {
+    public long Version { get; set; }
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Name { get; set; } = "";
     public List<string> Tags { get; set; } = [];
@@ -33,3 +34,6 @@ public record ItemRequest(long Revision, Item Item);
 public record TagRequest(long Revision, Tag Tag);
 public record RevisionRequest(long Revision);
 public record ImportRequest(long Revision, string Path, bool Recursive);
+
+public record BatchRequest(Dictionary<string,long> Versions, string Action, List<string>? AddTags = null, List<string>? RemoveTags = null);
+public record ItemPage(List<Item> Items, int Total, int Offset, int Limit);

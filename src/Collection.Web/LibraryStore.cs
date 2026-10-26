@@ -1,51 +1,8 @@
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 namespace Collection.Web;
-
-// v0.1 stores one validated document in SQLite. A transaction and revision guard
-// prevent partial writes and stale browser tabs from overwriting newer changes.
-public sealed class LibraryStore
+public sealed partial class LibraryStore
 {
-    public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
-    private readonly object gate = new();
-    private readonly string connectionString;
-    public LibraryStore(string folder)
-    {
-        Directory.CreateDirectory(folder);
-        connectionString = new SqliteConnectionStringBuilder { DataSource = Path.Combine(folder, "collection.db") }.ToString();
-        using var db = Open();
-        using var cmd = db.CreateCommand();
-        cmd.CommandText = "CREATE TABLE IF NOT EXISTS library(id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);";
-        cmd.ExecuteNonQuery();
-        cmd.CommandText = "INSERT OR IGNORE INTO library(id,json) VALUES(1,$json)";
-        cmd.Parameters.AddWithValue("$json", JsonSerializer.Serialize(Seed(), Json));
-        cmd.ExecuteNonQuery();
-    }
-    private SqliteConnection Open() { var db = new SqliteConnection(connectionString); db.Open(); return db; }
-    public LibraryState Read()
-    {
-        lock (gate) { using var db = Open(); return Load(db); }
-    }
-    private static LibraryState Load(SqliteConnection db, SqliteTransaction? tx = null)
-    {
-        using var cmd = db.CreateCommand(); cmd.Transaction = tx;
-        cmd.CommandText = "SELECT json FROM library WHERE id=1";
-        return JsonSerializer.Deserialize<LibraryState>((string)cmd.ExecuteScalar()!, Json)!;
-    }
-    public LibraryState Change(long revision, Action<LibraryState> change)
-    {
-        lock (gate)
-        {
-            using var db = Open(); using var tx = db.BeginTransaction();
-            var state = Load(db, tx);
-            if (state.Revision != revision) throw new ConflictException("数据已被其他操作更新，请刷新后重试。");
-            change(state); Validate(state); state.Revision++;
-            using var cmd = db.CreateCommand(); cmd.Transaction = tx;
-            cmd.CommandText = "UPDATE library SET json=$json WHERE id=1";
-            cmd.Parameters.AddWithValue("$json", JsonSerializer.Serialize(state, Json));
-            cmd.ExecuteNonQuery(); tx.Commit(); return state;
-        }
-    }
     public static HashSet<string> EffectiveTags(LibraryState state, Item item)
     {
         var result = new HashSet<string>();

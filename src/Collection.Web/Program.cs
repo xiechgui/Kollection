@@ -15,6 +15,9 @@ builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o => 
 var folder=Environment.GetEnvironmentVariable("COLLECTION_DATA")??Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Shicang");
 if(mobile.Cloud && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("COLLECTION_DATA"))) throw new ArgumentException("Cloud mode requires COLLECTION_DATA on a persistent volume.");
 var store=new LibraryStore(folder);
+var jobs=new ImportJobs(store,folder);
+builder.Services.AddHostedService(_=>jobs);
+var thumbnails=new ThumbnailCache(folder);
 var app=builder.Build();
 app.Use(async(ctx,next)=>{
     // Platform health probes do not expose collection data or require login.
@@ -36,28 +39,28 @@ app.MapGet("/api/client", (HttpContext ctx) => new { remote = !mobile.CanAccessL
 app.MapPost("/api/logout", (HttpContext ctx) => { mobile.Logout(ctx); return Results.Ok(); });
 app.MapGet("/api/state",()=>store.Read());
 app.MapGet("/api/export",()=>Results.File(JsonSerializer.SerializeToUtf8Bytes(store.Read(),LibraryStore.Json),"application/json","collection-export.json"));
-app.MapPost("/api/items",(ItemRequest r)=>store.Change(r.Revision,s=>{
-    if(s.Items.Any(i=>i.Id==r.Item.Id))throw new ArgumentException("ID 已存在。");r.Item.Draft=false;r.Item.Source=null;r.Item.UpdatedAt=DateTimeOffset.UtcNow;s.Items.Add(r.Item);
-}));
-app.MapPut("/api/items/{id}",(string id,ItemRequest r)=>store.Change(r.Revision,s=>{
-    var old=s.Items.FirstOrDefault(i=>i.Id==id)??throw new ArgumentException("对象不存在。");
-    r.Item.Id=id;r.Item.Draft=old.Draft;r.Item.Source=old.Source;r.Item.UpdatedAt=DateTimeOffset.UtcNow;s.Items[s.Items.IndexOf(old)]=r.Item;
-}));
-app.MapPost("/api/items/{id}/confirm",(string id,ItemRequest r)=>store.Change(r.Revision,s=>{
-    var old=s.Items.FirstOrDefault(i=>i.Id==id&&i.Draft)??throw new ArgumentException("暂存对象不存在或已确认。");
-    r.Item.Id=id;r.Item.Draft=false;r.Item.Source=old.Source;r.Item.UpdatedAt=DateTimeOffset.UtcNow;s.Items[s.Items.IndexOf(old)]=r.Item;
-}));
-app.MapDelete("/api/items/{id}",(string id,long revision)=>store.Change(revision,s=>{
-    if(s.Items.Any(i=>i.Id!=id&&i.Values.Values.Any(v=>v.Refs.Contains(id))))throw new ConflictException("该对象仍被引用，请先解除引用。");
-    if(s.Items.RemoveAll(i=>i.Id==id)==0)throw new ArgumentException("对象不存在。");
-}));
-app.MapPost("/api/tags",(TagRequest r)=>store.Change(r.Revision,s=>{
+bool Compact(HttpContext ctx)=>ctx.Request.Query["compact"]=="1";
+object Mutation(HttpContext ctx,Item? item=null)=>Compact(ctx)?new {item,catalog=store.Catalog()}:store.Read();
+app.MapGet("/api/catalog",()=>store.Catalog());
+app.MapGet("/api/items",(bool? draft,string? q,string? tag,int? offset,int? limit)=>store.Query(draft??false,q,tag,offset??0,limit??60));
+app.MapGet("/api/items/{id}",(string id)=>store.Get(id) is {} item?Results.Ok(new{item,related=store.Related(id)}):Results.NotFound());
+app.MapGet("/api/items/{id}/inbound",(string id,bool? draft,int? offset)=>store.Query(draft??false,null,null,offset??0,60,id));
+app.MapPost("/api/items",(HttpContext ctx,ItemRequest r)=>Mutation(ctx,store.Save(r)));
+app.MapPut("/api/items/{id}",(HttpContext ctx,string id,ItemRequest r)=>Mutation(ctx,store.Save(r,id)));
+app.MapPost("/api/items/{id}/confirm",(HttpContext ctx,string id,ItemRequest r)=>Mutation(ctx,store.Save(r,id,true)));
+app.MapDelete("/api/items/{id}",(HttpContext ctx,string id,long revision,long? version)=>{store.Delete(id,revision,version);return Mutation(ctx);});
+app.MapPost("/api/drafts/batch",(BatchRequest r)=>{store.Batch(r);return store.Catalog();});
+app.MapGet("/api/imports",(HttpContext ctx)=>mobile.CanAccessLocalFiles(ctx)?Results.Ok(jobs.List()):Results.StatusCode(403));
+app.MapPost("/api/imports",(HttpContext ctx,ImportRequest r)=>mobile.CanAccessLocalFiles(ctx)?Results.Ok(jobs.Add(r.Path,r.Recursive)):Results.StatusCode(403));
+app.MapPost("/api/imports/{id}/cancel",(HttpContext ctx,string id)=>{if(!mobile.CanAccessLocalFiles(ctx))return Results.StatusCode(403);jobs.Cancel(id);return Results.Ok();});
+app.MapPost("/api/imports/{id}/retry",(HttpContext ctx,string id)=>mobile.CanAccessLocalFiles(ctx)?Results.Ok(jobs.Retry(id)):Results.StatusCode(403));
+app.MapPost("/api/tags",(HttpContext ctx,TagRequest r)=>{store.Change(r.Revision,s=>{
     var old=s.Tags.FirstOrDefault(t=>t.Id==r.Tag.Id);
     if(old!=null)s.Tags[s.Tags.IndexOf(old)]=r.Tag;else s.Tags.Add(r.Tag);
-}));
+});return Mutation(ctx);});
 app.MapPost("/api/import",(HttpContext ctx, ImportRequest r)=>{
     if(!mobile.CanAccessLocalFiles(ctx)) return Results.Json(new {error="手机端请使用上传文件；电脑路径扫描只能在电脑端操作。"}, statusCode:403);
-    object? summary=null;var state=store.Change(r.Revision,s=>summary=FileImporter.Import(s,r.Path,r.Recursive));return Results.Ok(new{state,summary});
+    var summary=FileImporter.Import(store,r.Path,r.Recursive,r.Revision);return Results.Ok(new{state=store.Read(),summary});
 });
 app.MapPost("/api/upload", async (HttpContext ctx) => {
     if (!ctx.Request.HasFormContentType) return Results.BadRequest(new { error = "请选择一个文件。" });
@@ -74,18 +77,15 @@ app.MapPost("/api/upload", async (HttpContext ctx) => {
     try {
         var target = Path.Combine(directory, name);
         await using (var output = File.Create(target)) await file.CopyToAsync(output, ctx.RequestAborted);
-        object? summary = null;
-        var state = store.Change(revision, s => {
-            var count = s.Items.Count;
-            summary = FileImporter.Import(s, target, false);
-            if (s.Items.Count == count) throw new ArgumentException("收藏库已满，无法接收文件。");
-        });
-        return Results.Ok(new {state, summary});
+        var result=store.AddCandidates([FileImporter.Candidate(target)],revision);
+        var summary=new{added=result.Added,skipped=result.Skipped,failed=0,limited=false};
+        return Compact(ctx)?Results.Ok(new{catalog=store.Catalog(),summary}):Results.Ok(new {state=store.Read(), summary});
     } catch { Directory.Delete(directory, true); throw; }
 });
 app.MapGet("/api/items/{id}/media",(string id)=>{
-    var s=store.Read();var i=s.Items.FirstOrDefault(i=>i.Id==id&&!i.Draft);
-    if(i==null||!LibraryStore.EffectiveTags(s,i).Contains("file"))return Results.NotFound();
+    var i=store.Get(id);
+    if(i?.Draft==true)i=null;
+    if(i==null||!store.IsFile(i))return Results.NotFound();
     var path=i.Values.GetValueOrDefault("path")?.Text;
     if(path==null||!File.Exists(path))return Results.NotFound();
     if(mobile.Cloud) {
@@ -96,10 +96,20 @@ app.MapGet("/api/items/{id}/media",(string id)=>{
     if(!provider.TryGetContentType(path,out var type)||!(type.StartsWith("image/")&&type!="image/svg+xml"||type.StartsWith("video/")))return Results.BadRequest(new{error="此类型不支持浏览器预览。"});
     return Results.File(Path.GetFullPath(path),type,enableRangeProcessing:true);
 });
+app.MapGet("/api/items/{id}/thumbnail",async (HttpContext ctx,string id)=>{
+    var item=store.Get(id);if(item==null||item.Draft||!store.IsFile(item))return Results.NotFound();
+    var path=item.Values.GetValueOrDefault("path")?.Text;
+    if(path==null||!File.Exists(path))return Results.NotFound();
+    if(mobile.Cloud){var uploads=Path.GetFullPath(Path.Combine(folder,"uploads"))+Path.DirectorySeparatorChar;if(!Path.GetFullPath(path).StartsWith(uploads,OperatingSystem.IsWindows()?StringComparison.OrdinalIgnoreCase:StringComparison.Ordinal))return Results.NotFound();}
+    try{var cached=await thumbnails.Get(path,ctx.RequestAborted);return Results.File(await File.ReadAllBytesAsync(cached,ctx.RequestAborted),"image/jpeg");}
+    catch(Exception e) when(e is ArgumentException or IOException or UnauthorizedAccessException){return Results.NotFound();}
+});
+app.MapPost("/api/thumbnails/rebuild",async (HttpContext ctx)=>{await thumbnails.Clear(ctx.RequestAborted);return Results.Ok();});
 app.MapPost("/api/items/{id}/locate",(HttpContext ctx, string id)=>{
     if(!mobile.CanAccessLocalFiles(ctx))return Results.Json(new{error="资源管理器定位只能在电脑端操作。"},statusCode:403);
-    var s=store.Read();var i=s.Items.FirstOrDefault(i=>i.Id==id&&!i.Draft);
-    if(i==null||!LibraryStore.EffectiveTags(s,i).Contains("file"))return Results.BadRequest(new{error="不是正式文件对象。"});
+    var i=store.Get(id);
+    if(i?.Draft==true)i=null;
+    if(i==null||!store.IsFile(i))return Results.BadRequest(new{error="不是正式文件对象。"});
     var path=i.Values.GetValueOrDefault("path")?.Text;
     if(path==null||!File.Exists(path))return Results.BadRequest(new{error="文件不存在，请修改路径。"});
     if(!OperatingSystem.IsWindows())return Results.BadRequest(new{error="定位文件仅在 Windows 可用。"});

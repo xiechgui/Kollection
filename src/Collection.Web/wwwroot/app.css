@@ -28,3 +28,5 @@
  #toast{z-index:50;bottom:calc(85px + env(safe-area-inset-bottom));width:max-content;max-width:calc(100vw - 32px)}.empty{padding:40px 12px}.login-page{padding:16px}
 }
 @media(max-width:360px){header{gap:5px;padding:10px}.brand{font-size:18px}header button{padding:7px;font-size:12px}.art{height:120px}}
+
+.batch-toolbar,.pagination{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:12px 0}.draft-card{min-width:0}.draft-card>.tile{width:100%}#import-jobs{margin:12px 0}#import-jobs details{padding:8px;border:1px solid #ddd;border-radius:8px}#import-jobs pre{white-space:pre-wrap;overflow-wrap:anywhere}
