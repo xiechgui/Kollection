@@ -39,7 +39,8 @@ try {
   w.confirm = () => true;
   w.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   w.HTMLDialogElement.prototype.close = function () { this.open = false; };
-  w.fetch = (url, opts) => fetch(new URL(url, base), opts);
+  const uiRequests=[];
+  w.fetch = (url, opts) => { uiRequests.push(url); return fetch(new URL(url, base), opts); };
   w.eval(js);
   const get = s => { const el = doc.querySelector(s); assert.ok(el, s); return el; };
   const input = (s, value) => { const el = get(s); el.value = value; el.dispatchEvent(new w.Event('input', { bubbles: true })); };
@@ -115,6 +116,22 @@ try {
     await waitFor(async () => !(await state()).items.find(i => i.id === draft.id).draft);
     await waitFor(() => get('#title').textContent === '全部收藏');
     assert.ok(get('#content').textContent.includes('Reviewed text'));
+  });
+  await test('Batch confirm selected candidates without fetching the whole library', async () => {
+    for(const name of ['batch-a.txt','batch-b.txt']) {
+      const path=join(temp,name);await writeFile(path,'batch fixture');
+      const revision=(await state()).revision;
+      const response=await fetch(base+'/api/import',{method:'POST',headers:{'Content-Type':'application/json','X-Collection-Client':'local-ui'},body:JSON.stringify({revision,path,recursive:false})});
+      assert.equal(response.status,200);
+    }
+    get('[data-view="drafts"]').click();
+    await waitFor(()=>doc.querySelectorAll('[data-select]').length===2);
+    get('#select-page').click();
+    await waitFor(()=>get('#selection-count').textContent.includes('2'));
+    get('#batch-confirm').click();
+    await waitFor(async()=>(await state()).items.filter(i=>i.draft).length===0);
+    await waitFor(()=>get('#selection-count').textContent.includes('0'));
+    assert.ok(!uiRequests.some(url=>url.startsWith('/api/state')), 'UI must use paged queries, not whole-library snapshots');
   });
   assert.deepEqual(errors, [], 'Unhandled DOM errors');
   assert.deepEqual(failures, [], 'UI regression failures');
