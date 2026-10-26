@@ -83,7 +83,7 @@ public sealed partial class LibraryStore
             return new {revision=Revision(db),tags,counts,count=Convert.ToInt32(Scalar(db,"SELECT count(*) FROM items WHERE draft=0")),draftCount=Convert.ToInt32(Scalar(db,"SELECT count(*) FROM items WHERE draft=1"))};
         }
     }
-    public ItemPage Query(bool draft,string? query,string? tag,int offset,int limit,string? inbound=null)
+    public ItemPage Query(bool? draft,string? query,string? tag,int offset,int limit,string? inbound=null)
     {
         offset=Math.Max(0,offset);limit=Math.Clamp(limit,1,100);
         lock(gate)
@@ -91,7 +91,7 @@ public sealed partial class LibraryStore
             using var db=Open();var tags=Tags(db);var state=new LibraryState{Tags=tags};
             var filterIds=string.IsNullOrEmpty(tag)?new List<string>():tags.Where(t=>EffectiveTags(state,new Item{Tags=[t.Id]}).Contains(tag)).Select(t=>t.Id).ToList();
             var matchingTags=string.IsNullOrEmpty(query)?new List<string>():tags.Where(t=>EffectiveTags(state,new Item{Tags=[t.Id]}).Any(id=>tags.Any(x=>x.Id==id&&x.Name.Contains(query,StringComparison.OrdinalIgnoreCase)))).Select(t=>t.Id).ToList();
-            var where="draft=$draft";
+            var where="($draft IS NULL OR draft=$draft)";
             if(!string.IsNullOrEmpty(tag))where+=" AND EXISTS(SELECT 1 FROM item_tags it WHERE it.item_id=i.id AND it.tag_id IN(SELECT value FROM json_each($tags)))";
             if(!string.IsNullOrEmpty(query))where+="""
                  AND (instr(i.name_search,$q)>0
@@ -100,7 +100,7 @@ public sealed partial class LibraryStore
                  OR EXISTS(SELECT 1 FROM item_tags it WHERE it.item_id=i.id AND it.tag_id IN(SELECT value FROM json_each($matching))))
                 """;
             if(inbound!=null)where+=" AND EXISTS(SELECT 1 FROM refs r WHERE r.item_id=i.id AND r.target_id=$inbound)";
-            (string,object?)[] args=[("$draft",draft?1:0),("$tags",JsonSerializer.Serialize(filterIds)),("$matching",JsonSerializer.Serialize(matchingTags)),("$q",query?.ToLowerInvariant()),("$inbound",inbound),("$offset",offset),("$limit",limit)];
+            (string,object?)[] args=[("$draft",draft.HasValue?(object)(draft.Value?1:0):null),("$tags",JsonSerializer.Serialize(filterIds)),("$matching",JsonSerializer.Serialize(matchingTags)),("$q",query?.ToLowerInvariant()),("$inbound",inbound),("$offset",offset),("$limit",limit)];
             var total=Convert.ToInt32(Scalar(db,"SELECT count(*) FROM items i WHERE "+where,args));
             return new(Rows<Item>(db,"SELECT i.json FROM items i WHERE "+where+" ORDER BY updated DESC,id LIMIT $limit OFFSET $offset",args),total,offset,limit);
         }

@@ -44,7 +44,7 @@ object Mutation(HttpContext ctx,Item? item=null)=>Compact(ctx)?new {item,catalog
 app.MapGet("/api/catalog",()=>store.Catalog());
 app.MapGet("/api/items",(bool? draft,string? q,string? tag,int? offset,int? limit)=>store.Query(draft??false,q,tag,offset??0,limit??60));
 app.MapGet("/api/items/{id}",(string id)=>store.Get(id) is {} item?Results.Ok(new{item,related=store.Related(id)}):Results.NotFound());
-app.MapGet("/api/items/{id}/inbound",(string id,bool? draft,int? offset)=>store.Query(draft??false,null,null,offset??0,60,id));
+app.MapGet("/api/items/{id}/inbound",(string id,bool? draft,int? offset)=>store.Query(draft,null,null,offset??0,60,id));
 app.MapPost("/api/items",(HttpContext ctx,ItemRequest r)=>Mutation(ctx,store.Save(r)));
 app.MapPut("/api/items/{id}",(HttpContext ctx,string id,ItemRequest r)=>Mutation(ctx,store.Save(r,id)));
 app.MapPost("/api/items/{id}/confirm",(HttpContext ctx,string id,ItemRequest r)=>Mutation(ctx,store.Save(r,id,true)));

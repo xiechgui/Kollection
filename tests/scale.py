@@ -31,14 +31,15 @@ def stop(p):
     p.terminate();p.wait(timeout=10)
 
 # Migration, pagination, independent edits, jobs and cache use only disposable data.
-import sqlite3, base64
+import sqlite3, struct, zlib
+from contextlib import closing
 with tempfile.TemporaryDirectory() as tmp:
     proc=start(tmp)
     seed=call('/state');stop(proc)
     db=Path(tmp)/'collection.db';db.unlink()
     legacy=dict(seed)
     legacy['items']=[{'id':f'legacy-{n}','name':f'Legacy {n:04d}','tags':['text'],'values':{'body':{'text':'migration marker','refs':[]}},'draft':False,'updatedAt':'2026-01-01T00:00:00Z'} for n in range(125)]
-    with sqlite3.connect(db) as conn:
+    with closing(sqlite3.connect(db)) as conn, conn:
         conn.execute('CREATE TABLE library(id INTEGER PRIMARY KEY,json TEXT NOT NULL)')
         conn.execute('INSERT INTO library VALUES(1,?)',(json.dumps(legacy),))
     proc=start(tmp)
@@ -54,7 +55,7 @@ with tempfile.TemporaryDirectory() as tmp:
         b['name']='Changed B';call('/items/'+b['id']+'?compact=1','PUT',{'revision':revision,'item':b})
         call('/items/'+a['id'],'PUT',{'revision':revision,'item':a},expected=409)
         # Unrelated records are not rewritten by a single-object save.
-        with sqlite3.connect(db) as conn:
+        with closing(sqlite3.connect(db)) as conn, conn:
             assert conn.execute("SELECT version FROM items WHERE id='legacy-124'").fetchone()[0]==1
             assert conn.execute("SELECT count(*) FROM sqlite_master WHERE name='library'").fetchone()[0]==0
         files=Path(tmp)/'source';files.mkdir()
@@ -78,8 +79,11 @@ with tempfile.TemporaryDirectory() as tmp:
         assert all('later' in i['tags'] for i in drafts)
         call('/drafts/batch','POST',{'versions':{i['id']:i['version'] for i in drafts},'action':'confirm'})
         assert call('/catalog')['draftCount']==0
-        # A real 1x1 PNG must decode and produce a stable JPEG cache entry.
-        png=files/'pixel.png';png.write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='))
+        # A real 640x480 PNG must decode and produce a stable JPEG cache entry.
+        def png_bytes(red):
+            def chunk(kind,data):return struct.pack('>I',len(data))+kind+data+struct.pack('>I',zlib.crc32(kind+data)&0xffffffff)
+            return b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',640,480,8,2,0,0,0))+chunk(b'IDAT',zlib.compress((b'\x00'+bytes([red,0,0])*640)*480))+chunk(b'IEND',b'')
+        png=files/'pixel.png';png.write_bytes(png_bytes(255))
         imported=call('/import','POST',{'revision':call('/catalog')['revision'],'path':str(png),'recursive':False})
         pic=next(i for i in imported['state']['items'] if i['draft'])
         call('/items/'+pic['id']+'/confirm','POST',{'revision':imported['state']['revision'],'item':pic})
@@ -88,6 +92,9 @@ with tempfile.TemporaryDirectory() as tmp:
         caches=list((Path(tmp)/'thumbnails').glob('*.jpg'));assert len(caches)==1
         with urllib.request.urlopen(BASE+'/api/items/'+pic['id']+'/thumbnail') as response:response.read()
         assert list((Path(tmp)/'thumbnails').glob('*.jpg'))==caches
+        png.write_bytes(png_bytes(120));os.utime(png,(time.time()+2,time.time()+2))
+        with urllib.request.urlopen(BASE+'/api/items/'+pic['id']+'/thumbnail') as response:response.read()
+        assert len(list((Path(tmp)/'thumbnails').glob('*.jpg')))==2
         call('/thumbnails/rebuild','POST',{})
         assert not list((Path(tmp)/'thumbnails').glob('*.jpg'))
         # Startup preserves records and completed jobs; migration runs exactly once.
@@ -95,4 +102,19 @@ with tempfile.TemporaryDirectory() as tmp:
         assert call('/catalog')['count']==201 and len(list(Path(tmp).glob('collection-v1-*.db')))==1
         assert next(j for j in call('/imports') if j['id']==job['id'])['status']=='completed'
         print('PASS: legacy backup/migration, SQL pagination/search, row versions, atomic batch, persistent jobs, deduplication and thumbnail cache')
+    finally:stop(proc)
+
+# Test the retained capacity boundary with realistic server-side pagination.
+with tempfile.TemporaryDirectory() as tmp:
+    legacy['items']=[dict(legacy['items'][0],id=f'capacity-{n}',name=f'Capacity {n:05d}') for n in range(5000)]
+    with closing(sqlite3.connect(Path(tmp)/'collection.db')) as conn, conn:
+        conn.execute('CREATE TABLE library(id INTEGER PRIMARY KEY,json TEXT NOT NULL)')
+        conn.execute('INSERT INTO library VALUES(1,?)',(json.dumps(legacy),))
+    proc=start(tmp)
+    try:
+        begin=time.perf_counter();page=call('/items?offset=4940&limit=60');elapsed=time.perf_counter()-begin
+        assert page['total']==5000 and len(page['items'])==60
+        assert call('/items?q=Capacity')['total']==5000
+        call('/items','POST',{'revision':call('/catalog')['revision'],'item':{'id':'overflow','name':'Overflow','tags':[],'values':{}}},expected=400)
+        print(f'PASS: 5000-item capacity guard and pagination ({elapsed*1000:.1f} ms on this runner; not a performance guarantee)')
     finally:stop(proc)
