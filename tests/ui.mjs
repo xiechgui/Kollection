@@ -17,7 +17,8 @@ const server = spawn(process.env.DOTNET_EXE || 'dotnet', [join(root, 'src/Collec
 });
 const errors = [], failures = [];
 let dom;
-const pendingRequests=new Set();
+const pendingRequests=new Set(), uiTimers=new Set();
+let ending=false;
 async function waitFor(check) {
   const end = Date.now() + 10000;
   while (Date.now() < end) {
@@ -34,6 +35,12 @@ try {
   vc.on('jsdomError', e => errors.push(e.message));
   dom = new JSDOM(html, { url: base, runScripts: 'outside-only', virtualConsole: vc });
   const w = dom.window, doc = w.document;
+  const nativeSetTimeout=w.setTimeout.bind(w),nativeClearTimeout=w.clearTimeout.bind(w);
+  w.setTimeout=(callback,delay,...args)=>{
+    if(ending)return 0;
+    const timer=nativeSetTimeout(()=>{uiTimers.delete(timer);callback(...args);},delay);uiTimers.add(timer);return timer;
+  };
+  w.clearTimeout=timer=>{uiTimers.delete(timer);nativeClearTimeout(timer);};
   w.structuredClone = structuredClone;
   // LAN HTTP is not a secure context: exercise the getRandomValues fallback.
   w.crypto.randomUUID = undefined;
@@ -143,7 +150,7 @@ try {
 } finally {
   if(dom) {
     // Drain HTTP continuations before destroying the DOM; page timers are not assertions.
-    dom.window.eval('clearTimeout(pollJobs.timer);clearTimeout(render.timer);pollJobs=async()=>{};');
+    ending=true;for(const timer of uiTimers)dom.window.clearTimeout(timer);
     do {await Promise.allSettled([...pendingRequests]);await new Promise(resolve=>setImmediate(resolve));} while(pendingRequests.size);
     dom.window.close();
   }
