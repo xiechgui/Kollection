@@ -17,6 +17,7 @@ const server = spawn(process.env.DOTNET_EXE || 'dotnet', [join(root, 'src/Collec
 });
 const errors = [], failures = [];
 let dom;
+const pendingRequests=new Set();
 async function waitFor(check) {
   const end = Date.now() + 10000;
   while (Date.now() < end) {
@@ -40,7 +41,11 @@ try {
   w.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   w.HTMLDialogElement.prototype.close = function () { this.open = false; };
   const uiRequests=[];
-  w.fetch = (url, opts) => { uiRequests.push(url); return fetch(new URL(url, base), opts); };
+  w.fetch = (url, opts) => {
+    uiRequests.push(url);
+    const request=fetch(new URL(url, base), opts).then(async response=>{await response.clone().arrayBuffer();return response;});
+    pendingRequests.add(request);request.then(()=>pendingRequests.delete(request),()=>pendingRequests.delete(request));return request;
+  };
   w.eval(js);
   const get = s => { const el = doc.querySelector(s); assert.ok(el, s); return el; };
   const input = (s, value) => { const el = get(s); el.value = value; el.dispatchEvent(new w.Event('input', { bubbles: true })); };
@@ -136,7 +141,12 @@ try {
   assert.deepEqual(errors, [], 'Unhandled DOM errors');
   assert.deepEqual(failures, [], 'UI regression failures');
 } finally {
-  dom?.window.close();
+  if(dom) {
+    // Drain HTTP continuations before destroying the DOM; page timers are not assertions.
+    dom.window.eval('clearTimeout(pollJobs.timer);clearTimeout(render.timer);pollJobs=async()=>{};');
+    do {await Promise.allSettled([...pendingRequests]);await new Promise(resolve=>setImmediate(resolve));} while(pendingRequests.size);
+    dom.window.close();
+  }
   if (server.exitCode === null) {
     const exited = new Promise(r => server.once('exit', r)); server.kill(); await exited;
   }
