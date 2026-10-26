@@ -17,6 +17,8 @@ const server = spawn(process.env.DOTNET_EXE || 'dotnet', [join(root, 'src/Collec
 });
 const errors = [], failures = [];
 let dom;
+const pendingRequests=new Set(), uiTimers=new Set();
+let ending=false;
 async function waitFor(check) {
   const end = Date.now() + 10000;
   while (Date.now() < end) {
@@ -33,13 +35,24 @@ try {
   vc.on('jsdomError', e => errors.push(e.message));
   dom = new JSDOM(html, { url: base, runScripts: 'outside-only', virtualConsole: vc });
   const w = dom.window, doc = w.document;
+  const nativeSetTimeout=w.setTimeout.bind(w),nativeClearTimeout=w.clearTimeout.bind(w);
+  w.setTimeout=(callback,delay,...args)=>{
+    if(ending)return 0;
+    const timer=nativeSetTimeout(()=>{uiTimers.delete(timer);callback(...args);},delay);uiTimers.add(timer);return timer;
+  };
+  w.clearTimeout=timer=>{uiTimers.delete(timer);nativeClearTimeout(timer);};
   w.structuredClone = structuredClone;
   // LAN HTTP is not a secure context: exercise the getRandomValues fallback.
   w.crypto.randomUUID = undefined;
   w.confirm = () => true;
   w.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   w.HTMLDialogElement.prototype.close = function () { this.open = false; };
-  w.fetch = (url, opts) => fetch(new URL(url, base), opts);
+  const uiRequests=[];
+  w.fetch = (url, opts) => {
+    uiRequests.push(url);
+    const request=fetch(new URL(url, base), opts).then(async response=>{await response.clone().arrayBuffer();return response;});
+    pendingRequests.add(request);request.then(()=>pendingRequests.delete(request),()=>pendingRequests.delete(request));return request;
+  };
   w.eval(js);
   const get = s => { const el = doc.querySelector(s); assert.ok(el, s); return el; };
   const input = (s, value) => { const el = get(s); el.value = value; el.dispatchEvent(new w.Event('input', { bubbles: true })); };
@@ -75,10 +88,12 @@ try {
     get('#new').click(); input('#item-name', 'UI movie'); check('[data-tag-check="movie"]');
     change('[data-ref="actor"]', actor.id); input('[data-value="rating"]', '9'); await save();
     get(`[data-jump="${actor.id}"]`).click();
+    await waitFor(() => doc.querySelector('#item-name')?.value === 'UI actor');
     assert.equal(get('#item-name').value, 'UI actor');
     assert.ok(get('#detail').textContent.includes('UI movie'));
     const movie = (await state()).items.find(i => i.name === 'UI movie');
     get(`#detail [data-jump="${movie.id}"]`).click();
+    await waitFor(() => doc.querySelector('[data-value="rating"]'));
     assert.equal(get('[data-value="rating"]').value, '9');
   });
   await test('Clearing a suggested attribute removes its stored value', async () => {
@@ -93,6 +108,7 @@ try {
     get('#import').click(); input('#import-path', file);
     get('#modal-form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
     await waitFor(() => !get('#modal').open);
+    await waitFor(() => get('#content').textContent.includes('ui-import.txt'));
     assert.equal(get('#search').value, '');
     assert.ok(get('#content').textContent.includes('ui-import.txt'));
   });
@@ -106,16 +122,38 @@ try {
   await test('Review import edits and confirm into collection', async () => {
     get('[data-view="drafts"]').click();
     const draft = (await state()).items.find(i => i.draft);
-    get(`[data-item="${draft.id}"]`).click(); input('#item-name', 'Reviewed text');
+    await waitFor(() => doc.querySelector(`[data-item="${draft.id}"]`));
+    get(`[data-item="${draft.id}"]`).click(); await waitFor(() => doc.querySelector('#approve')); input('#item-name', 'Reviewed text');
     get('#approve').click();
     await waitFor(async () => !(await state()).items.find(i => i.id === draft.id).draft);
     await waitFor(() => get('#title').textContent === '全部收藏');
     assert.ok(get('#content').textContent.includes('Reviewed text'));
   });
+  await test('Batch confirm selected candidates without fetching the whole library', async () => {
+    for(const name of ['batch-a.txt','batch-b.txt']) {
+      const path=join(temp,name);await writeFile(path,'batch fixture');
+      const revision=(await state()).revision;
+      const response=await fetch(base+'/api/import',{method:'POST',headers:{'Content-Type':'application/json','X-Collection-Client':'local-ui'},body:JSON.stringify({revision,path,recursive:false})});
+      assert.equal(response.status,200);
+    }
+    get('[data-view="drafts"]').click();
+    await waitFor(()=>doc.querySelectorAll('[data-select]').length===2);
+    get('#select-page').click();
+    await waitFor(()=>get('#selection-count').textContent.includes('2'));
+    get('#batch-confirm').click();
+    await waitFor(async()=>(await state()).items.filter(i=>i.draft).length===0);
+    await waitFor(()=>get('#selection-count').textContent.includes('0'));
+    assert.ok(!uiRequests.some(url=>url.startsWith('/api/state')), 'UI must use paged queries, not whole-library snapshots');
+  });
   assert.deepEqual(errors, [], 'Unhandled DOM errors');
   assert.deepEqual(failures, [], 'UI regression failures');
 } finally {
-  dom?.window.close();
+  if(dom) {
+    // Drain HTTP continuations before destroying the DOM; page timers are not assertions.
+    ending=true;for(const timer of uiTimers)dom.window.clearTimeout(timer);
+    do {await Promise.allSettled([...pendingRequests]);await new Promise(resolve=>setImmediate(resolve));} while(pendingRequests.size);
+    dom.window.close();
+  }
   if (server.exitCode === null) {
     const exited = new Promise(r => server.once('exit', r)); server.kill(); await exited;
   }
